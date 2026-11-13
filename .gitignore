@@ -1,1 +1,4 @@
 kptncook
+.env
+__pycache__/
+*.py[cod]

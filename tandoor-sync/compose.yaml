@@ -1,0 +1,23 @@
+services:
+  sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      STATE_PATH: /data/history.sqlite3
+    volumes:
+      - sync-state:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 150s
+
+volumes:
+  sync-state:
