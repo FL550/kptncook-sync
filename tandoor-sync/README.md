@@ -16,7 +16,7 @@ to run when they are unavailable. A published package change may require
 updating the adapter; check image logs and run the test suite before deploying
 an upgrade.
 
-## Configure and run
+## Configure
 
 1. Copy `.env.example` to `.env`, fill it in, and restrict it to your user:
 
@@ -57,21 +57,27 @@ an upgrade.
    named volume must support SQLite locking/durability and be writable by
    container UID/GID 10001. Docker initializes a new named volume from the
    image's `/data` permissions; check ownership if using an external volume.
-7. Building requires Docker Engine with Compose/Buildx, `curl`, and Python 3
-   with `pip` on the host, plus access to PyPI and the Docker registry. From
-   this directory, build before starting:
+7. Build the image before first use (see [Build](#build-the-image)).
 
-   ```sh
-   sh build.sh
-   ```
+## Build the image
 
-   `build.sh` reads the current stable release from PyPI, passes that exact
-   version as a build argument, and builds without cache. The version is
-   verified in the image, logged at startup, and recorded in the
-   `org.opencontainers.image.version` label. An already-built image never
-   updates itself. Retain the prior image for rollback. Run `sh build.sh`
-   before `docker compose up -d` on a fresh install or upgrade; Compose's
-   implicit build does not resolve the required KptnCook version argument.
+Building requires Docker Engine with Compose/Buildx, `curl`, and Python 3
+with `pip` on the host, plus access to PyPI and the Docker registry. From
+this directory, build before starting:
+
+```sh
+sh build.sh
+```
+
+`build.sh` reads the current stable release from PyPI, passes that exact
+version as a build argument, and builds without cache. The version is
+verified in the image, logged at startup, and recorded in the
+`org.opencontainers.image.version` label. An already-built image never
+updates itself. Retain the prior image for rollback. Run `sh build.sh`
+before `docker compose up -d` on a fresh install or upgrade; Compose's
+implicit build does not resolve the required KptnCook version argument.
+
+## Usage
 
 ### Verify the KptnCook inventory before the first sync
 
@@ -120,6 +126,56 @@ After each completed run it waits `SYNC_INTERVAL_SECONDS` (default `86400`,
 The container uses `restart: unless-stopped`, so Docker restarts it after an
 unexpected exit. If a sync run fails, the error is logged and the next attempt
 still waits the full configured interval; there is no immediate retry/backoff.
+
+### Running on a server
+
+Run the service on any Linux host with Docker Engine and the Compose plugin:
+
+1. Copy this directory to the server (for example with `git clone` or `rsync`),
+   then create and `chmod 600` its `.env` as described in
+   [Configure](#configure).
+2. Build the image on the server with `sh build.sh`.
+3. Complete the inventory check above, set `KPTNCOOK_FAVORITES_COMPLETE=true`,
+   and start it detached: `docker compose up -d`.
+4. Check it with `docker compose ps` and `docker compose logs -f sync`.
+   `restart: unless-stopped` restarts it after crashes and, as long as the
+   Docker daemon starts at boot (`sudo systemctl enable docker`), after server
+   reboots. No port is published; the service only makes outbound requests.
+5. To upgrade, `git pull` (or copy the new sources), run `sh build.sh`, then
+   `docker compose up -d` to recreate the container. The `sync-state` volume
+   and history are kept. Never use `docker compose down -v` for upgrades.
+
+Example `compose.yaml` for a server (this is the file shipped in this
+directory; the build arg is filled in by `build.sh`):
+
+```yaml
+services:
+  sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        KPTNCOOK_VERSION: ${KPTNCOOK_VERSION:-}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      KPTNCOOK_HOME: /data
+      STATE_PATH: /data/history.sqlite3
+    volumes:
+      - sync-state:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 150s
+
+volumes:
+  sync-state:
+```
 
 There is no `--once` option or manual “sync now” command. The available CLI
 commands are for reconciling uncertain writes only:
