@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
+from collections import defaultdict, deque
+from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -27,7 +30,7 @@ class TandoorClient:
                 "Authorization": f"Bearer {settings.tandoor_token}",
                 "Accept": "application/json",
             },
-            timeout=httpx.Timeout(settings.request_timeout_seconds, connect=10),
+            timeout=httpx.Timeout(settings.request_timeout_seconds),
             follow_redirects=False,
         )
 
@@ -42,7 +45,7 @@ class TandoorClient:
         grouped_ingredients = payload.pop("ingredients", [])
         if not isinstance(grouped_ingredients, list):
             raise TandoorError("Converted recipe contains an invalid ingredient list")
-        _annotate_groups(payload.get("steps"), grouped_ingredients)
+        _reconcile_ingredients(payload.get("steps"), grouped_ingredients)
         payload["cookbook"] = space_id
         payload = _drop_none(payload)
         if not isinstance(payload.get("name"), str) or not payload["name"].strip():
@@ -57,7 +60,12 @@ class TandoorClient:
             if not isinstance(ingredients, list):
                 raise TandoorError("Converted recipe contains invalid step ingredients")
             for ingredient in ingredients:
-                if not isinstance(ingredient, dict) or not isinstance(ingredient.get("food"), dict):
+                if (
+                    not isinstance(ingredient, dict)
+                    or not isinstance(ingredient.get("food"), dict)
+                    or not isinstance(ingredient["food"].get("name"), str)
+                    or not ingredient["food"]["name"].strip()
+                ):
                     raise TandoorError("Converted recipe contains an invalid ingredient")
         return payload
 
@@ -77,6 +85,11 @@ class TandoorClient:
         except Exception:
             raise TandoorError("Recipe create request failed; remote outcome is uncertain") from None
         if response.status_code < 200 or response.status_code >= 300:
+            if response.status_code in {401, 403}:
+                raise TandoorError(
+                    f"Tandoor authentication or permission failed (HTTP {response.status_code}); "
+                    "remote outcome is uncertain"
+                )
             raise TandoorError(
                 f"Recipe create returned HTTP {response.status_code}; remote outcome is uncertain"
             )
@@ -103,6 +116,11 @@ class TandoorClient:
         except Exception:
             raise TandoorError("Cover upload failed") from None
         if response.status_code < 200 or response.status_code >= 300:
+            if response.status_code in {401, 403}:
+                raise TandoorError(
+                    f"Tandoor image authentication or permission failed "
+                    f"(HTTP {response.status_code})"
+                )
             raise TandoorError(f"Cover upload returned HTTP {response.status_code}")
 
     def close(self) -> None:
@@ -128,11 +146,51 @@ def _strings(value: Any):
         yield value
 
 
-def _annotate_groups(steps: Any, entries: list[object]) -> None:
-    if not isinstance(steps, list):
+def _ingredient_fingerprint(ingredient: object) -> tuple[str, int | float | None, str | None]:
+    if not isinstance(ingredient, dict):
+        raise TandoorError("Converted recipe contains an invalid ingredient entry")
+    food = ingredient.get("food")
+    name = food.get("name") if isinstance(food, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        raise TandoorError("Converted recipe contains an ingredient without a food name")
+
+    amount = ingredient.get("amount")
+    if amount is not None and (
+        isinstance(amount, bool)
+        or not isinstance(amount, (int, float))
+        or not math.isfinite(amount)
+    ):
+        raise TandoorError("Converted recipe contains an invalid ingredient amount")
+
+    unit = ingredient.get("unit")
+    if isinstance(unit, dict):
+        unit = unit.get("name")
+    if unit is not None and not isinstance(unit, str):
+        raise TandoorError("Converted recipe contains an invalid ingredient unit")
+    return name.strip().casefold(), amount, unit.strip().casefold() if unit else None
+
+
+def _reconcile_ingredients(steps: Any, entries: list[object]) -> None:
+    if not isinstance(steps, list) or not steps:
         return
+
+    by_fingerprint: dict[tuple[str, int | float | None, str | None], deque[dict[str, Any]]] = (
+        defaultdict(deque)
+    )
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        step_ingredients = step.get("ingredients", [])
+        if not isinstance(step_ingredients, list):
+            continue
+        for ingredient in step_ingredients:
+            by_fingerprint[_ingredient_fingerprint(ingredient)].append(ingredient)
+
     active_group: str | None = None
-    names_to_groups: dict[str, set[str]] = {}
+    unassigned: list[dict[str, Any]] = []
+    seen_groups: dict[
+        tuple[str, int | float | None, str | None], str | None
+    ] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             raise TandoorError("Converted recipe contains an invalid ingredient entry")
@@ -140,20 +198,45 @@ def _annotate_groups(steps: Any, entries: list[object]) -> None:
             label = entry.get("note")
             active_group = label.strip() if isinstance(label, str) and label.strip() else None
             continue
-        food = entry.get("food")
-        name = food.get("name") if isinstance(food, dict) else entry.get("name")
-        if active_group and isinstance(name, str) and name.strip():
-            names_to_groups.setdefault(name.strip().casefold(), set()).add(active_group)
-    for step in steps:
-        if not isinstance(step, dict):
+
+        fingerprint = _ingredient_fingerprint(entry)
+        if fingerprint in seen_groups and seen_groups[fingerprint] != active_group:
+            raise TandoorError(
+                "Converted recipe has indistinguishable ingredients in different groups"
+            )
+        seen_groups[fingerprint] = active_group
+        matched = by_fingerprint[fingerprint]
+        if matched:
+            target = matched.popleft()
+            if active_group:
+                note = target.get("note")
+                if note not in (None, "", active_group):
+                    raise TandoorError(
+                        "Converted recipe has conflicting ingredient and group notes"
+                    )
+                target["note"] = active_group
             continue
-        for ingredient in step.get("ingredients", []):
-            if not isinstance(ingredient, dict):
-                continue
-            food = ingredient.get("food")
-            name = food.get("name") if isinstance(food, dict) else None
-            groups = names_to_groups.get(name.strip().casefold(), set()) if isinstance(name, str) else set()
-            # Only annotate an unambiguous match; never guess across same-name groups.
-            if len(groups) == 1 and not ingredient.get("note"):
-                ingredient["note"] = next(iter(groups))
+
+        ingredient = {
+            key: deepcopy(entry[key])
+            for key in ("food", "amount", "unit")
+            if key in entry
+        }
+        if active_group:
+            note = ingredient.get("note")
+            if note not in (None, "", active_group):
+                raise TandoorError(
+                    "Converted recipe has conflicting ingredient and group notes"
+                )
+            ingredient["note"] = active_group
+        unassigned.append(ingredient)
+
+    if unassigned:
+        last_step = steps[-1]
+        if not isinstance(last_step, dict):
+            raise TandoorError("Converted recipe contains an invalid final step")
+        step_ingredients = last_step.setdefault("ingredients", [])
+        if not isinstance(step_ingredients, list):
+            raise TandoorError("Converted recipe contains invalid final step ingredients")
+        step_ingredients.extend(unassigned)
 

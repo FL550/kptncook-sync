@@ -3,10 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        KPTNCOOK_VERSION: ${KPTNCOOK_VERSION:-}
     restart: unless-stopped
     env_file:
       - .env
     environment:
+      KPTNCOOK_HOME: /data
       STATE_PATH: /data/history.sqlite3
     volumes:
       - sync-state:/data

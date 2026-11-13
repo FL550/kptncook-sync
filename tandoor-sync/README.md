@@ -38,19 +38,41 @@ an upgrade.
 6. From this directory, build and start with:
 
    ```sh
-   docker compose build --pull --no-cache sync
+   sh build.sh
    docker compose up -d
    docker compose logs -f sync
    ```
 
-   `--no-cache` is required when you want a rebuild to check PyPI rather than
-   reuse a cached package-install layer. An already-built image never updates
-   itself. Retain the prior image for rollback.
+   `build.sh` reads the current stable release from PyPI, passes that exact
+   version as a build argument, and builds without cache. The version is
+   verified in the image, logged at startup, and recorded in the
+   `org.opencontainers.image.version` label. An already-built image never
+   updates itself. Retain the prior image for rollback.
 
-The service executes a run immediately, then waits the configured
-`SYNC_INTERVAL_SECONDS` (default 86400) after completion. Runs do not overlap.
-`HTTP_TIMEOUT_SECONDS` bounds network requests (1–120 seconds). The Compose
-container runs non-root, drops Linux capabilities, and restarts unless stopped.
+The normal mode is the scheduler: `docker compose up -d` starts the container,
+which performs one sync immediately and then repeats automatically. The loop
+lives inside the service; no host cron job or separate scheduler is needed.
+After each completed run it waits `SYNC_INTERVAL_SECONDS` (default `86400`,
+24 hours) before starting the next one, so runs never overlap. Running
+`docker compose up` without `-d` keeps the same scheduler in the foreground.
+The container uses `restart: unless-stopped`, so Docker restarts it after an
+unexpected exit.
+
+There is no `--once` option or manual “sync now” command. The available CLI
+commands are for reconciling uncertain writes only:
+
+```sh
+docker compose run --rm sync --help
+docker compose run --rm sync list-uncertain
+docker compose run --rm sync mark-imported SOURCE_OID DESTINATION_ID
+docker compose run --rm sync clear-for-retry SOURCE_OID --confirm-no-remote-recipe
+```
+
+`--rm` is a Docker Compose option that removes the temporary admin container
+when the command exits; it does not affect the service container. Admin
+commands do not start a sync. `HTTP_TIMEOUT_SECONDS` bounds network requests
+(1–120 seconds). The Compose container runs non-root and drops Linux
+capabilities.
 
 ## History and recovery
 
@@ -66,14 +88,6 @@ create response, it persists an `imported` tombstone before attempting the
 optional image upload. An interrupted or ambiguous create remains `uncertain`
 and is never retried automatically: exactly-once creation cannot be guaranteed
 across HTTP and SQLite. A failed image upload is logged and is not retried.
-
-Administrative commands do not initiate a sync:
-
-```sh
-docker compose run --rm sync list-uncertain
-docker compose run --rm sync mark-imported SOURCE_OID DESTINATION_ID
-docker compose run --rm sync clear-for-retry SOURCE_OID --confirm-no-remote-recipe
-```
 
 Inspect Tandoor manually before resolving an uncertain write. Mark it imported
 only with a verified destination ID. Clear it only after confirming no recipe
@@ -94,6 +108,24 @@ prove completeness from a truncated response that carries no pagination
 metadata; that is why the explicit completeness confirmation gates all reads
 and writes by default. Malformed or unresolved favorites stop the run before
 writes.
+
+Run unit tests from this directory with `uv sync --extra test && uv run pytest`.
+An opt-in API contract test creates a temporary recipe, uploads a JPEG, checks
+nested ingredients and cookbook assignment, then deletes the recipe. Run it
+only against a disposable Tandoor instance with a token scoped for create,
+read, image upload, and delete:
+
+```sh
+TANDOOR_INTEGRATION_CONFIRM=I_ACCEPT_DISPOSABLE_TANDOOR_DATA \
+TANDOOR_TEST_URL=https://disposable-tandoor.example \
+TANDOOR_TEST_TOKEN=... \
+TANDOOR_TEST_SPACE_ID=1 \
+TANDOOR_TEST_IMAGE=/path/to/test.jpg \
+uv run pytest -q tests/test_tandoor_integration.py
+```
+
+The integration test is skipped unless the explicit confirmation is set.
+Never configure it with a real user's library.
 
 Use the source API and client only in accordance with their terms and for
 personal use where permitted. Do not expose logs publicly: logs contain source

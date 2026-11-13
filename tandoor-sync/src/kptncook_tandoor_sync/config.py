@@ -67,7 +67,9 @@ class Settings:
             kptncook_api_key=_required("KPTNCOOK_API_KEY"),
             kptncook_access_token=_required("KPTNCOOK_ACCESS_TOKEN"),
             kptncook_account_id=_required("KPTNCOOK_ACCOUNT_ID"),
-            kptncook_api_url=_base_url("KPTNCOOK_API_URL"),
+            kptncook_api_url=_base_url("KPTNCOOK_API_URL")
+            if os.environ.get("KPTNCOOK_API_URL", "").strip()
+            else "https://mobile.kptncook.com",
             kptncook_favorites_complete=complete_value == "true",
             kptncook_lang=os.environ.get("KPTNCOOK_LANG", "de"),
             kptncook_store=os.environ.get("KPTNCOOK_STORE", "de"),
