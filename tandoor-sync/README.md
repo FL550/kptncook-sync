@@ -77,6 +77,17 @@ updates itself. Retain the prior image for rollback. Run `sh build.sh`
 before `docker compose up -d` on a fresh install or upgrade; Compose's
 implicit build does not resolve the required KptnCook version argument.
 
+### Prebuilt images
+
+The GitHub Actions workflow `.github/workflows/docker-image.yml` publishes
+multi-arch (amd64/arm64) images to `ghcr.io/<owner>/<repo>`. It runs only
+when triggered manually (Actions tab > "Build and publish image" > Run
+workflow), so re-run it to pick up new stable KptnCook releases. Tags:
+`latest` and `kptncook-<version>` (when run on the default branch), plus
+`sha-<commit>`. To use one, replace the `build:` block in
+`compose.yaml` with `image: ghcr.io/<owner>/<repo>:latest` and run
+`docker compose pull && docker compose up -d`.
+
 ## Usage
 
 ### Verify the KptnCook inventory before the first sync
